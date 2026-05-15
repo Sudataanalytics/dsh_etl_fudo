@@ -89,6 +89,14 @@ ON CONFLICT (id_sucursal) DO UPDATE SET
     secret_manager_apikey_name = EXCLUDED.secret_manager_apikey_name, secret_manager_apisecret_name = EXCLUDED.secret_manager_apisecret_name,
     updated_at = CURRENT_TIMESTAMP;
 
+-- Añadir la nueva sucursal 'nani_panaderia'
+INSERT INTO public.config_fudo_branches (id_sucursal, fudo_branch_identifier, sucursal_name, secret_manager_apikey_name, secret_manager_apisecret_name)
+VALUES ('nani_pasteleria', 'MThAMjgyODQz', 'Nani Pastelería', 'FUDO_NANI_PASTELERIA_APIKEY', 'FUDO_NANI_PASTELERIA_APISECRET')
+ON CONFLICT (id_sucursal) DO UPDATE SET
+    fudo_branch_identifier = EXCLUDED.fudo_branch_identifier, sucursal_name = EXCLUDED.sucursal_name,
+    secret_manager_apikey_name = EXCLUDED.secret_manager_apikey_name, secret_manager_apisecret_name = EXCLUDED.secret_manager_apisecret_name,
+    updated_at = CURRENT_TIMESTAMP;
+
 
 -- ----------------------------------------------------------------------
 -- 2. TABLAS PARA LA CAPA DE DATOS CRUDOS (RAW LAYER)
