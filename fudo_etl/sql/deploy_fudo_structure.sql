@@ -301,12 +301,16 @@ CREATE TABLE IF NOT EXISTS public.Sucursales (
 );
 
 -- mv_sucursales
-CREATE TABLE IF NOT EXISTS public.Sucursales (id_sucursal VARCHAR(255) PRIMARY KEY, sucursal VARCHAR(255) NOT NULL);
+-- mv_sucursales (CORREGIDA PARA EXCLUIR VALORES VACÍOS)
 DROP MATERIALIZED VIEW IF EXISTS public.mv_sucursales CASCADE;
 CREATE MATERIALIZED VIEW public.mv_sucursales AS
-SELECT id_sucursal, sucursal_name AS sucursal FROM public.config_fudo_branches WHERE is_active = TRUE;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_sucursales_id_sucursal ON public.mv_sucursales (id_sucursal); -- <--- NUEVO ÍNDICE
-
+SELECT
+    id_sucursal,
+    sucursal_name AS sucursal
+FROM public.config_fudo_branches
+WHERE is_active = TRUE
+  AND id_sucursal IS NOT NULL -- Asegurar que no sea NULL
+  AND id_sucursal <> ''; -- Asegurar que no sea una cadena vacía
 -- Rubros (DER)
 CREATE TABLE IF NOT EXISTS public.Rubros (
   id_rubro INTEGER PRIMARY KEY,

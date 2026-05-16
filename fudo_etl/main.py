@@ -43,15 +43,19 @@ def refresh_analytics_materialized_views(db_manager: DBManager):
 
     materialized_views_configs = [
         # MVs del DER (ya existentes)
-        ('mv_sucursales', """
-            CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_sucursales AS
+        ('mv_sucursales', 
+         """
+            CREATE MATERIALIZED VIEW public.mv_sucursales AS
             SELECT
                 id_sucursal,
                 sucursal_name AS sucursal
             FROM public.config_fudo_branches
-            WHERE is_active = TRUE;
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_sucursales_id ON public.mv_sucursales (id_sucursal);
-        """),
+            WHERE is_active = TRUE
+              AND id_sucursal IS NOT NULL -- Asegurar que no sea NULL
+              AND id_sucursal <> ''; -- Asegurar que no sea una cadena vacía
+         """,
+         "CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_sucursales_id ON public.mv_sucursales (id_sucursal);"
+        ),
         ('mv_rubros', """
             DROP MATERIALIZED VIEW IF EXISTS public.mv_rubros CASCADE;
             CREATE MATERIALIZED VIEW public.mv_rubros AS
