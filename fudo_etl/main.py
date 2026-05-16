@@ -45,6 +45,7 @@ def refresh_analytics_materialized_views(db_manager: DBManager):
         # MVs del DER (ya existentes)
         ('mv_sucursales', 
          """
+            DROP MATERIALIZED VIEW IF EXISTS public.mv_rubros CASCADE;
             CREATE MATERIALIZED VIEW public.mv_sucursales AS
             SELECT
                 id_sucursal,
@@ -614,13 +615,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_product_categories_key ON public.mv_pro
             continue  # Continuar con las siguientes vistas aunque esta falle
 
     # Luego, las MVs del DER (ya existentes y se refrescan)
-    for mv_name, create_sql in materialized_views_configs: # Usa materialized_views_configs aquí
+    for mv_name, create_sql, create_index_sql  in materialized_views_configs: # Usa materialized_views_configs aquí
         logger.info(f"  Procesando Vista Materializada: '{mv_name}'...")
         try:
             # Intentar crear la MV si no existe
             logger.info(f"    Intentando crear MV '{mv_name}' si no existe...")
             db_manager.execute_query(create_sql) # Ejecuta el CREATE MV IF NOT EXISTS
             logger.info(f"    MV '{mv_name}' creada/existente.")
+
+            # 2. Intentar crear el índice único (NUEVO PASO)
+            logger.info(f"    Intentando crear índice único para '{mv_name}'...")
+            db_manager.execute_query(create_index_sql)
 
             # --- CORRECCIÓN CRÍTICA AQUÍ: Usar REFRESH CONCURRENTLY ---
             logger.info(f"    Refrescando MV '{mv_name}' CONCURRENTLY...")
