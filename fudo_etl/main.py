@@ -629,7 +629,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_product_categories_key ON public.mv_pro
 
             # --- CORRECCIÓN CRÍTICA AQUÍ: Usar REFRESH CONCURRENTLY ---
             logger.info(f"    Refrescando MV '{mv_name}' CONCURRENTLY...")
-            db_manager.execute_query(f"REFRESH MATERIALIZED VIEW CONCURRENTLY public.{mv_name};")
+            db_manager.execute_query(f"REFRESH MATERIALIZED VIEW public.{mv_name};")
             logger.info(f"    MV '{mv_name}' refrescada exitosamente.")
             # --------------------------------------------------------
 
