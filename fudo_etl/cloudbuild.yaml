@@ -11,7 +11,7 @@ steps:
   id: Push
 
 # 3. Deploy to Cloud Run Jobs
-- name: 'gcr.io/google.com/cloudsdk/cloud-sdk'
+- name: 'gcr.io/google.com/cloudsdktool/google-cloud-cli'
   args: [
       'run', 'jobs', 'deploy', 'ginesta-fudo-etl-job',
       '--image', 'us-central1-docker.pkg.dev/${PROJECT_ID}/ginesta-fudo-etl-repo/ginesta-fudo-etl:${_TAG_NAME}',
