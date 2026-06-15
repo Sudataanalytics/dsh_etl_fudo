@@ -21,7 +21,7 @@ steps:
       '--task-timeout=7200',    # Optimizado: Reducido de 7200s a 1800s (30 mins)
       '--max-retries=3',
       '--cpu=1',               # Optimizado: Reducido de 1 a 0.5 vCPU
-      '--memory=1Gi'             # Optimizado: Reducido de 4Gi a 1Gi
+      '--memory=4Gi'             
   ]
   id: Deploy
 
