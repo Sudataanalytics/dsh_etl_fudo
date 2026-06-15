@@ -661,7 +661,7 @@ def run_fudo_raw_etl(db_manager: DBManager): # db_manager ahora se pasa como arg
         project_id = config.get("gcp_project_id")
 
         # Reutilizar el db_manager pasado
-        metadata_manager = ETLMetadataManager(db_manager) # Usar db_manager pasado
+        metadata_manager = ETLMetadataManager(db_manager) # Usar db_manager pasado..
         authenticator = FudoAuthenticator(db_manager, config['fudo_auth_endpoint'], project_id) # Usar db_manager pasado
         api_client = FudoApiClient(config['fudo_api_base_url'])
 
