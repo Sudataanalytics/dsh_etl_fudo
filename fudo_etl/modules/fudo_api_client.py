@@ -1,21 +1,44 @@
 # fudo_etl/modules/fudo_api_client.py
-import requests
+import os
 import time
 import logging
 from datetime import datetime, timezone
+from typing import Callable, Iterator
+
+from .http_retry import build_retry_session
 
 logger = logging.getLogger(__name__)
+
+
+class EntityDeadlineExceeded(TimeoutError):
+    """La extracción de una entidad superó su tiempo máximo permitido."""
+
+
+class EntityForbiddenError(PermissionError):
+    """Fudo respondió 403: el usuario API de la sucursal no tiene permiso sobre la entidad."""
+
 
 class FudoApiClient:
     def __init__(self, api_base_url: str):
         self.api_base_url = api_base_url
         self.auth_token = None
-        self.max_retries = 15
-        self.initial_backoff_delay = 5
-        self.max_backoff_delay = 300
-        self.inter_page_delay = 1.0
-        
-        # --- Mapeo EXPLÍCITO: SOLO PARA ENTIDADES QUE SOPORTAN 'fields' ---
+        # 500 es el máximo real: si se piden más, Fudo devuelve solo 250 sin avisar y la
+        # paginación cortaría antes de tiempo (len(data) < page_size) perdiendo datos.
+        self.page_size = 500
+        # Pausa preventiva entre páginas; los 429 igual los maneja el Retry respetando Retry-After
+        self.inter_page_delay = float(os.getenv("API_INTER_PAGE_DELAY_SECONDS", "0.15"))
+        # (connect, read) en segundos
+        self.request_timeout = (5, 30)
+        # Tiempo máximo total para extraer una entidad de una sucursal
+        self.entity_deadline_seconds = int(os.getenv("API_ENTITY_DEADLINE_SECONDS", "1800"))
+
+        # Reintentos ante errores transitorios, respetando Retry-After (con tope)
+        self.session = build_retry_session({"GET"})
+        # Función que devuelve un token nuevo; se usa para recuperarse de un 401 a mitad de corrida
+        self.token_refresher: Callable[[], str] | None = None
+
+        # --- Mapeo EXPLÍCITO: SOLO para las que SÍ necesitan fields para traer datos extra ---
+        # No incluimos 'products' ni 'customers' aquí para que Fudo mande el JSON COMPLETO por defecto.
         self.fields_key_mapping = {
             'expenses': 'expense',
             'expense-categories': 'expenseCategory',
@@ -23,148 +46,110 @@ class FudoApiClient:
 
         self.fields_parameters = {
             'expense': 'amount,canceled,cashRegister,createdAt,date,description,dueDate,expenseCategory,expenseItems,paymentDate,paymentMethod,provider,receiptNumber,receiptType,status,useInCashCount,user',
-            'expenseCategory': ('active,financialCategory,name,parentCategory'),
+            'expenseCategory': 'active,financialCategory,name,parentCategory',
         }
 
-        # --- ENTIDADES CON FILTRO INCREMENTAL POR 'createdAt' ---
+        # --- Entidades que siempre se descargan completas (Para evitar errores 400 de filtro) ---
+        # 'expenses' también: un filtro por createdAt no traería los gastos que se pagan o cambian
+        # de estado después de creados. Como la carga conserva el historial, solo se insertan los cambios.
+        self.entities_for_full_refresh = [
+            'sales', 'payments', 'payment-methods', 'product-categories',
+            'product-modifiers', 'products', 'customers', 'discounts',
+            'ingredients', 'items', 'kitchens', 'roles', 'rooms',
+            'tables', 'users', 'expense-categories', 'expenses'
+        ]
+
+        # --- Entidades con filtro incremental ---
         self.incremental_filter_entities = {
             'sales': 'createdAt',
         }
 
     def set_auth_token(self, token: str):
         self.auth_token = token
-        logger.debug("Token de autenticación establecido para FudoApiClient.")
+        self.session.headers["Authorization"] = f"Bearer {token}"
+        logger.debug("Token de autenticación establecido.")
 
-    def get_data(self, entity_name: str, id_sucursal: str, last_extracted_ts: datetime = None) -> list[dict]:
+    def close(self):
+        self.session.close()
+
+    def iter_pages(self, entity_name: str, id_sucursal: str, last_extracted_ts: datetime = None) -> Iterator[list[dict]]:
         """
-        Extrae datos paginados de la API de Fudo.
-        En esta versión, 'sales' siempre hace full load completo.
+        Extrae datos de la API de Fudo y devuelve un generador de páginas (listas de registros).
+        Así nunca se mantiene en memoria más de una página por vez.
+        Si la entidad está en 'entities_for_full_refresh', ignora el timestamp y trae todo.
         """
         if not self.auth_token:
-            raise ValueError("Token de autenticación no establecido. Llama a set_auth_token primero.")
+            raise ValueError("Token de autenticación no establecido.")
 
-        request_url = f"{self.api_base_url}/v1alpha1/{entity_name}"
-        page_size = 500
-        headers = {
-            "Authorization": f"Bearer {self.auth_token}",
-            "Accept": "application/json"
-        }
+        is_full_refresh = entity_name in self.entities_for_full_refresh
+        apply_filter = (not is_full_refresh and last_extracted_ts is not None)
 
-        # --- FULL LOAD permanente para 'sales' ---
-        if entity_name == 'sales':
-            logger.info(f"\n--- EJECUCIÓN DE FULL LOAD: Extracción completa de '{entity_name}' para sucursal '{id_sucursal}'. ---")
-            all_sales = self._get_paginated_data_generic(
-                request_url=request_url,
-                headers=headers,
-                page_size=page_size,
-                entity_name=entity_name,
-                id_sucursal=id_sucursal,
-                apply_incremental_filter=False,  # Ignora el filtro incremental
-                start_page=1,
-                max_pages=-1  # Sin límite: trae todo
-            )
-            logger.info(f"  Total de ventas únicas extraídas (carga completa): {len(all_sales)}")
-            return all_sales
+        if is_full_refresh:
+            logger.info(f"--- ESTRATEGIA FULL REFRESH: {entity_name} ---")
+        else:
+            logger.info(f"--- ESTRATEGIA INCREMENTAL: {entity_name} ---")
 
-        # --- Lógica genérica para otras entidades ---
-        logger.info(f"  Iniciando extracción de '{entity_name}' para sucursal '{id_sucursal}' con estrategia incremental/full.")
-        return self._get_paginated_data_generic(
-            request_url=request_url,
-            headers=headers,
-            page_size=page_size,
+        fields_key = self.fields_key_mapping.get(entity_name)
+        return self._iter_paginated_data_generic(
+            request_url=f"{self.api_base_url}/v1alpha1/{entity_name}",
             entity_name=entity_name,
-            id_sucursal=id_sucursal,
-            apply_incremental_filter=bool(last_extracted_ts),
+            apply_incremental_filter=apply_filter,
             incremental_filter_ts=last_extracted_ts,
-            fields_key=self.fields_key_mapping.get(entity_name),
-            fields_params=self.fields_parameters.get(self.fields_key_mapping.get(entity_name)),
-            start_page=1,
-            max_pages=-1
+            fields_key=fields_key,
+            fields_params=self.fields_parameters.get(fields_key or ''),
         )
 
-    # --- MÉTODO AUXILIAR genérico con paginación y reintentos ---
-    def _get_paginated_data_generic(self, request_url: str, headers: dict, page_size: int,
-                                    entity_name: str, id_sucursal: str,
-                                    apply_incremental_filter: bool, incremental_filter_ts: datetime = None,
-                                    fields_key: str = None, fields_params: str = None,
-                                    start_page: int = 1, max_pages: int = -1) -> list[dict]:
-        """
-        Extrae datos paginados de la API de Fudo con control de reintentos y backoff exponencial.
-        """
-        all_items = []
-        current_page = start_page
-        
+    def _iter_paginated_data_generic(self, request_url, entity_name, apply_incremental_filter,
+                                     incremental_filter_ts=None, fields_key=None, fields_params=None,
+                                     start_page=1, max_pages=-1) -> Iterator[list[dict]]:
         params = {}
-        # Filtro incremental si corresponde
-        if apply_incremental_filter and incremental_filter_ts and self.incremental_filter_entities.get(entity_name):
-            filter_field = self.incremental_filter_entities.get(entity_name)
-            formatted_ts = incremental_filter_ts.astimezone(timezone.utc).isoformat(timespec='seconds')
-            if not formatted_ts.endswith('Z'):
-                formatted_ts += 'Z'
+
+        # Filtro de fecha
+        if apply_incremental_filter and incremental_filter_ts:
+            filter_field = self.incremental_filter_entities.get(entity_name, 'createdAt')
+            formatted_ts = incremental_filter_ts.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
             params[f'filter[{filter_field}]'] = f"gte.{formatted_ts}"
-            logger.debug(f"  Aplicando filtro incremental '{filter_field} >= {formatted_ts}' para {entity_name}.")
-        
-        # Campos 'fields'
+
+        # Filtro de campos (Solo si está definido en el mapeo)
         if fields_key and fields_params:
             params[f'fields[{fields_key}]'] = fields_params
-            logger.debug(f"  Aplicando parámetro 'fields[{fields_key}]' para '{entity_name}'.")
 
-        while True:
-            if max_pages != -1 and current_page > (start_page - 1) + max_pages:
-                logger.debug(f"  Alcanzado el límite de {max_pages} páginas para '{entity_name}'.")
-                break
-            
-            retries = 0
-            delay = self.initial_backoff_delay
+        deadline = time.monotonic() + self.entity_deadline_seconds
+        current_page = start_page
 
-            while retries < self.max_retries:
-                try:
-                    current_params = params.copy()
-                    current_params['page[size]'] = page_size
-                    current_params['page[number]'] = current_page
+        while max_pages == -1 or current_page < start_page + max_pages:
+            if time.monotonic() > deadline:
+                raise EntityDeadlineExceeded(
+                    f"'{entity_name}' superó el deadline de {self.entity_deadline_seconds}s (página {current_page})."
+                )
 
-                    logger.debug(f"GET {request_url} params={current_params} (Intento {retries+1}/{self.max_retries}, pág {current_page})")
-                    response = requests.get(request_url, params=current_params, headers=headers, timeout=60)
-                    response.raise_for_status()
+            current_params = params.copy()
+            current_params['page[size]'] = self.page_size
+            current_params['page[number]'] = current_page
 
-                    data = response.json().get('data', [])
-                    logger.debug(f"Página {current_page}: {len(data)} ítems recuperados para '{entity_name}' ({id_sucursal}).")
+            # Los reintentos transitorios los maneja el HTTPAdapter; si se agotan, la excepción sube.
+            response = self.session.get(request_url, params=current_params, timeout=self.request_timeout)
+            if response.status_code == 401 and self.token_refresher:
+                # Token vencido o revocado a mitad de la extracción: se renueva una vez y se repite la página
+                logger.warning(f"401 en {entity_name} (página {current_page}). Renovando token y reintentando.")
+                self.set_auth_token(self.token_refresher())
+                response = self.session.get(request_url, params=current_params, timeout=self.request_timeout)
+            if response.status_code == 403:
+                # Falta de permisos del rol en Fudo, no un fallo del ETL: lo informa quien llama como aviso
+                raise EntityForbiddenError(f"403 Forbidden en '{entity_name}' (página {current_page}): {response.text[:200]}")
+            if response.status_code == 400:
+                logger.error(f"Error 400 en {entity_name} (página {current_page}): parámetro 'fields' o filtro "
+                             f"inválido. {response.text[:500]}")
+                response.raise_for_status()
+            if not response.ok:
+                logger.error(f"Error {response.status_code} en {entity_name} (página {current_page}): {response.text[:500]}")
+                response.raise_for_status()
 
-                    all_items.extend(data)
+            data = response.json().get('data', [])
+            if data:
+                yield data
+            if not data or len(data) < self.page_size:
+                return
 
-                    if not data or len(data) < page_size:
-                        logger.debug(f"  Última página o página incompleta. Extracción de '{entity_name}' finalizada.")
-                        return all_items
-
-                    current_page += 1
-                    time.sleep(self.inter_page_delay)
-                    break
-
-                except requests.exceptions.HTTPError as e:
-                    status = e.response.status_code
-                    if status in [429, 500, 502, 503, 504]:
-                        retries += 1
-                        logger.warning(f"HTTP {status} en '{entity_name}' (pág {current_page}). Reintentando en {delay}s ({retries}/{self.max_retries})...")
-                        time.sleep(delay)
-                        delay = min(delay * 2, self.max_backoff_delay)
-                    elif status == 401:
-                        logger.error("Token expirado o inválido (401). No reintentar.")
-                        raise
-                    elif status == 400:
-                        logger.error(f"Error 400: parámetro 'fields' o filtro inválido para '{entity_name}'. {e.response.text}", exc_info=True)
-                        raise
-                    else:
-                        logger.error(f"HTTP {status} no reintentable en '{entity_name}' (pág {current_page}): {e.response.text}", exc_info=True)
-                        raise
-
-                except requests.exceptions.RequestException as e:
-                    retries += 1
-                    logger.warning(f"Error de conexión en '{entity_name}' (pág {current_page}). Reintentando en {delay}s ({retries}/{self.max_retries})... {e}")
-                    time.sleep(delay)
-                    delay = min(delay * 2, self.max_backoff_delay)
-
-            else:
-                logger.error(f"Máximo de reintentos ({self.max_retries}) alcanzado para '{entity_name}' ({id_sucursal}) en la pág {current_page}.")
-                raise ConnectionError(f"Fallo al extraer '{entity_name}' tras {self.max_retries} reintentos.")
-        
-        return all_items
+            current_page += 1
+            time.sleep(self.inter_page_delay)

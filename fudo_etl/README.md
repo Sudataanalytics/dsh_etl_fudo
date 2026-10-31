@@ -46,6 +46,32 @@ code
 Code
 ---
 
+## 🔄 **Cómo funciona una corrida (V2.0)**
+
+1.  **Estructura:** `sql/deploy_fudo_structure.sql` crea, si faltan, las tablas de metadatos, `config_fudo_branches`, las RAW `fudo_raw_*` y las del DER, y actualiza las sucursales. Las MVs y las vistas RAW **no** se recrean ahí.
+2.  **Credenciales:** se pide el token de cada sucursal activa. La que no tiene credenciales válidas se omite con un aviso `[CREDENCIALES]` y el resto sigue.
+3.  **Extracción:** varias sucursales y entidades en paralelo. Cada página de la API se carga apenas llega.
+    *   Todas las entidades se bajan completas desde la API (incluido `expenses`, para captar los gastos que se pagan o cambian de estado después de creados).
+    *   Las tablas RAW **conservan el historial**: solo se inserta una fila cuando cambia el contenido (checksum), así que repetir una corrida no duplica datos. `fudo_raw_sales` guarda una fila por venta y la actualiza si cambió.
+    *   Reintentos automáticos ante 429/5xx (respetando `Retry-After`) y ante cortes de la base; el token se renueva ante un 401. Una entidad sin permiso en Fudo (403) se informa con `[PERMISOS]` y no cuenta como falla.
+    *   El checkpoint de una entidad solo avanza si terminó completa.
+4.  **Transformación:** las vistas `fudo_view_raw_*` se recrean y las MVs `mv_*` (definidas en `modules/analytical_layer_mvs.py`) se crean solo si no existen y se refrescan `CONCURRENTLY`, así Power BI puede seguir leyendo.
+5.  **Resultado:** el proceso termina con código `1` si falló alguna entidad o MV (por eso el job usa `--max-retries=1`).
+
+**Variables opcionales** (todas tienen valor por defecto):
+
+| Variable | Default | Para qué |
+|---|---|---|
+| `ETL_BRANCH_WORKERS` / `ETL_ENTITY_WORKERS` | 3 / 2 | Sucursales y entidades en paralelo |
+| `DB_POOL_SIZE` | workers + 1 | Conexiones simultáneas a Donweb |
+| `DB_STATEMENT_TIMEOUT_MS` / `DB_LOCK_TIMEOUT_MS` | 15 min / 30 s | Timeouts de la base |
+| `API_INTER_PAGE_DELAY_SECONDS` | 0.15 | Pausa entre páginas de la API |
+| `API_ENTITY_DEADLINE_SECONDS` | 1800 | Tiempo máximo por entidad y sucursal |
+| `FUDO_MAX_RETRY_AFTER_SECONDS` | 300 | Tope de espera ante un 429 |
+| `REBUILD_MVS` | false | `true` recrea todas las MVs (usar al cambiar su definición) |
+
+---
+
 ## ⚙️ **Configuración y Despliegue**
 
 ### **1. Entorno de Desarrollo Local**
