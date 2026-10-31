@@ -23,7 +23,8 @@ def get_secret(secret_name: str, project_id: str = None) -> str:
             logger.debug(f"Secret '{secret_name}' obtenido de variable de entorno local.")
             return env_value
         else:
-            raise ValueError(f"Secret '{secret_name}' not found in local .env file. Please add it.")
+            # Igual que en GCP: es un problema de configuración, se informa como aviso [CREDENCIALES]
+            raise SecretNotFoundError(f"El secret '{secret_name}' no está definido en el .env local.")
     
     # Si no estamos en entorno local, intentamos Secret Manager (para GCP)
     # --- ESTA SECCIÓN DEBE ESTAR DESCOMENTADA PARA GCP ---
