@@ -426,6 +426,13 @@ BEGIN
         SELECT tablename FROM pg_tables
         WHERE schemaname = 'public'
           AND tablename LIKE 'fudo\_raw\_%'
+          -- Solo tablas que tengan la columna: puede haber fudo_raw_* creadas fuera de este
+          -- script (p. ej. fudo_raw_suppliers) sin id_sucursal_fuente, y el CREATE INDEX fallaría.
+          AND EXISTS (
+              SELECT 1 FROM information_schema.columns c
+              WHERE c.table_schema = 'public' AND c.table_name = pg_tables.tablename
+                AND c.column_name = 'id_sucursal_fuente'
+          )
           AND NOT EXISTS (
               SELECT 1 FROM pg_indexes i
               WHERE i.schemaname = 'public' AND i.tablename = pg_tables.tablename
